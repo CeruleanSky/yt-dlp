@@ -1,0 +1,118 @@
+name: Sync with upstream (selective)
+
+on:
+  schedule:
+    - cron: '0 6 * * *'          # 06:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sync-upstream
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout fork (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream https://github.com/yt-dlp/yt-dlp.git 2>/dev/null \
+            || git remote set-url upstream https://github.com/yt-dlp/yt-dlp.git
+          git fetch upstream master
+          git fetch origin master
+
+
+      - name: Selective cherry-pick
+        id: cherry
+        env:
+          # Always skip these two commits completely
+          SKIP_SHAS: "3d28cf4780fa88689fc50010d72cf2f40ce3a3b8,43a45ae37419b2a90db710c9fd06cd250ef524d3"
+        run: |
+          set -euo pipefail
+
+          mapfile -t NEW_COMMITS < <(git rev-list --reverse HEAD..upstream/master)
+
+          if [ ${#NEW_COMMITS[@]} -eq 0 ]; then
+            echo "No new commits."
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Found ${#NEW_COMMITS[@]} new commit(s)."
+
+          APPLIED=0
+          SKIPPED=0
+
+          for commit in "${NEW_COMMITS[@]}"; do
+            short=$(git rev-parse --short "$commit")
+            subject=$(git log -1 --pretty=format:'%s' "$commit")
+            message=$(git log -1 --pretty=format:'%B' "$commit")
+
+            # 1. Explicit SHA skip – never touch these
+            if echo "$SKIP_SHAS" | grep -q "$commit"; then
+              echo "SKIP (explicit SHA): $short  $subject"
+              ((SKIPPED++)) || true
+              continue
+            fi
+
+            # Does this commit touch pyproject.toml?
+            touches_pyproject=false
+            if git diff-tree --no-commit-id --name-only -r "$commit" | grep -qx 'pyproject.toml'; then
+              touches_pyproject=true
+            fi
+
+            echo "Applying: $short  $subject"
+
+            if [ "$touches_pyproject" = true ]; then
+              # Apply changes but do NOT commit yet
+              if ! git cherry-pick -n --allow-empty "$commit"; then
+                echo "::error::Conflict while applying $short – $subject"
+                git cherry-pick --abort || true
+                exit 1
+              fi
+
+              # Throw away only the pyproject.toml changes
+              git checkout HEAD -- pyproject.toml 2>/dev/null || true
+              git restore --staged --worktree pyproject.toml 2>/dev/null || true
+
+              # If nothing is left staged, this commit was only pyproject.toml → skip it
+              if git diff --cached --quiet; then
+                echo "SKIP (only touched pyproject.toml): $short  $subject"
+                git reset --hard HEAD   # clean up
+                ((SKIPPED++)) || true
+                continue
+              fi
+
+              # Commit the remaining changes with the original message
+              git commit -m "$message"
+            else
+              # Normal cherry-pick
+              if ! git cherry-pick --allow-empty "$commit"; then
+                echo "::error::Conflict on $short – $subject"
+                git cherry-pick --abort || true
+                exit 1
+              fi
+            fi
+
+            ((APPLIED++)) || true
+          done
+
+          echo "Applied: $APPLIED   Skipped: $SKIPPED"
+          if [ "$APPLIED" -gt 0 ]; then
+            echo "applied=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+          fi
