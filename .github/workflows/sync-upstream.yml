@@ -94,15 +94,21 @@ jobs:
               git commit -m "$message"
             else
               # Normal cherry-pick
-              if ! git cherry-pick --allow-empty "$commit"; then
-                # Check whether it failed because the commit is already applied (empty)
-                if git status | grep -q "The previous cherry-pick is now empty"; then
+              set +e
+              git cherry-pick --allow-empty "$commit"
+              status=$?
+              set -e
+
+              if [ $status -ne 0 ]; then
+                # Check if we are in the middle of a cherry-pick and the result is empty
+                if [ -f .git/CHERRY_PICK_HEAD ] && git diff --quiet && git diff --cached --quiet; then
                   echo "SKIP (already applied / empty): $short  $subject"
                   git cherry-pick --skip || true
                   ((SKIPPED++)) || true
                   continue
                 fi
 
+                # Real conflict
                 echo "::error::Conflict on $short – $subject"
                 git cherry-pick --abort || true
                 exit 1
@@ -119,7 +125,7 @@ jobs:
           else
             echo "applied=false" >> "$GITHUB_OUTPUT"
           fi
-
+          
       - name: Push if changes were applied
         if: steps.cherry.outputs.applied == 'true'
         run: |
