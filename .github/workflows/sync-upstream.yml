@@ -14,7 +14,6 @@ jobs:
     concurrency:
       group: sync-upstream
       cancel-in-progress: false
-
     steps:
       - name: Checkout fork (full history)
         uses: actions/checkout@v4
@@ -33,7 +32,6 @@ jobs:
             || git remote set-url upstream https://github.com/yt-dlp/yt-dlp.git
           git fetch upstream master
           git fetch origin master
-
 
       - name: Selective cherry-pick
         id: cherry
@@ -111,8 +109,14 @@ jobs:
           done
 
           echo "Applied: $APPLIED   Skipped: $SKIPPED"
+
           if [ "$APPLIED" -gt 0 ]; then
             echo "applied=true" >> "$GITHUB_OUTPUT"
           else
             echo "applied=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Push if changes were applied
+        if: steps.cherry.outputs.applied == 'true'
+        run: |
+          git push origin HEAD:master
