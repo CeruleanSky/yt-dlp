@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.YT_DLP_310_FORK }}   # ← use the PAT here
+          token: ${{ secrets.YT_DLP_310_FORK }}
 
       - name: Configure git
         run: |
@@ -40,15 +40,34 @@ jobs:
         run: |
           set -euo pipefail
 
-          mapfile -t NEW_COMMITS < <(git rev-list --reverse HEAD..upstream/master)
+          SYNC_POINT_FILE=".github/upstream-sync-point"
+          UPSTREAM_TIP=$(git rev-parse upstream/master)
+
+          # Determine the range of commits to examine
+          if [ -f "$SYNC_POINT_FILE" ]; then
+            LAST_SYNCED=$(cat "$SYNC_POINT_FILE" | tr -d '[:space:]')
+            echo "Last sync point: $LAST_SYNCED"
+            # Only commits after the last sync point
+            mapfile -t NEW_COMMITS < <(git rev-list --reverse "${LAST_SYNCED}..upstream/master")
+          else
+            echo "No previous sync point found – examining all commits not in HEAD"
+            mapfile -t NEW_COMMITS < <(git rev-list --reverse HEAD..upstream/master)
+          fi
 
           if [ ${#NEW_COMMITS[@]} -eq 0 ]; then
-            echo "No new commits."
+            echo "No new commits since last sync point."
             echo "applied=false" >> "$GITHUB_OUTPUT"
+            # Still update the sync point so we don't re-examine old history
+            echo "$UPSTREAM_TIP" > "$SYNC_POINT_FILE"
+            git add "$SYNC_POINT_FILE"
+            if ! git diff --cached --quiet; then
+              git commit -m "chore: update upstream sync point"
+              echo "applied=true" >> "$GITHUB_OUTPUT"
+            fi
             exit 0
           fi
 
-          echo "Found ${#NEW_COMMITS[@]} new commit(s)."
+          echo "Found ${#NEW_COMMITS[@]} new commit(s) to examine."
 
           APPLIED=0
           SKIPPED=0
@@ -73,14 +92,12 @@ jobs:
             echo "Applying: $short  $subject"
 
             if [ "$touches_pyproject" = true ]; then
-              # Apply without committing
               if ! git cherry-pick -n --allow-empty "$commit"; then
                 echo "::error::Conflict while applying $short – $subject"
                 git cherry-pick --abort || true
                 exit 1
               fi
 
-              # Discard pyproject.toml changes
               git checkout HEAD -- pyproject.toml 2>/dev/null || true
               git restore --staged --worktree pyproject.toml 2>/dev/null || true
 
@@ -93,14 +110,12 @@ jobs:
 
               git commit -m "$message"
             else
-              # Normal cherry-pick
               set +e
               git cherry-pick --allow-empty "$commit"
               status=$?
               set -e
 
               if [ $status -ne 0 ]; then
-                # Check if we are in the middle of a cherry-pick and the result is empty
                 if [ -f .git/CHERRY_PICK_HEAD ] && git diff --quiet && git diff --cached --quiet; then
                   echo "SKIP (already applied / empty): $short  $subject"
                   git cherry-pick --skip || true
@@ -108,7 +123,6 @@ jobs:
                   continue
                 fi
 
-                # Real conflict
                 echo "::error::Conflict on $short – $subject"
                 git cherry-pick --abort || true
                 exit 1
@@ -120,16 +134,23 @@ jobs:
 
           echo "Applied: $APPLIED   Skipped: $SKIPPED"
 
+          # Always update the sync point to the current upstream tip
+          mkdir -p .github
+          echo "$UPSTREAM_TIP" > "$SYNC_POINT_FILE"
+          git add "$SYNC_POINT_FILE"
+
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update upstream sync point to $(git rev-parse --short $UPSTREAM_TIP)"
+            ((APPLIED++)) || true
+          fi
+
           if [ "$APPLIED" -gt 0 ]; then
             echo "applied=true" >> "$GITHUB_OUTPUT"
           else
             echo "applied=false" >> "$GITHUB_OUTPUT"
           fi
-          
+
       - name: Push if changes were applied
         if: steps.cherry.outputs.applied == 'true'
         run: |
           git push origin HEAD:master
-
-
-
