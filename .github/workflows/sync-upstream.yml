@@ -58,6 +58,7 @@ jobs:
             subject=$(git log -1 --pretty=format:'%s' "$commit")
             message=$(git log -1 --pretty=format:'%B' "$commit")
 
+            # Explicit SHA skip
             if echo "$SKIP_SHAS" | grep -q "$commit"; then
               echo "SKIP (explicit SHA): $short  $subject"
               ((SKIPPED++)) || true
@@ -72,17 +73,19 @@ jobs:
             echo "Applying: $short  $subject"
 
             if [ "$touches_pyproject" = true ]; then
+              # Apply without committing
               if ! git cherry-pick -n --allow-empty "$commit"; then
                 echo "::error::Conflict while applying $short – $subject"
                 git cherry-pick --abort || true
                 exit 1
               fi
 
+              # Discard pyproject.toml changes
               git checkout HEAD -- pyproject.toml 2>/dev/null || true
               git restore --staged --worktree pyproject.toml 2>/dev/null || true
 
               if git diff --cached --quiet; then
-                echo "SKIP (only touched pyproject.toml): $short  $subject"
+                echo "SKIP (only touched pyproject.toml or already applied): $short  $subject"
                 git reset --hard HEAD
                 ((SKIPPED++)) || true
                 continue
@@ -90,7 +93,16 @@ jobs:
 
               git commit -m "$message"
             else
+              # Normal cherry-pick
               if ! git cherry-pick --allow-empty "$commit"; then
+                # Check whether it failed because the commit is already applied (empty)
+                if git status | grep -q "The previous cherry-pick is now empty"; then
+                  echo "SKIP (already applied / empty): $short  $subject"
+                  git cherry-pick --skip || true
+                  ((SKIPPED++)) || true
+                  continue
+                fi
+
                 echo "::error::Conflict on $short – $subject"
                 git cherry-pick --abort || true
                 exit 1
@@ -112,3 +124,6 @@ jobs:
         if: steps.cherry.outputs.applied == 'true'
         run: |
           git push origin HEAD:master
+
+
+
