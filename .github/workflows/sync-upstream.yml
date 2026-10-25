@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.YT_DLP_310_FORK }}   # ← use the PAT here
 
       - name: Configure git
         run: |
@@ -36,7 +36,6 @@ jobs:
       - name: Selective cherry-pick
         id: cherry
         env:
-          # Always skip these two commits completely
           SKIP_SHAS: "3d28cf4780fa88689fc50010d72cf2f40ce3a3b8,43a45ae37419b2a90db710c9fd06cd250ef524d3"
         run: |
           set -euo pipefail
@@ -59,14 +58,12 @@ jobs:
             subject=$(git log -1 --pretty=format:'%s' "$commit")
             message=$(git log -1 --pretty=format:'%B' "$commit")
 
-            # 1. Explicit SHA skip – never touch these
             if echo "$SKIP_SHAS" | grep -q "$commit"; then
               echo "SKIP (explicit SHA): $short  $subject"
               ((SKIPPED++)) || true
               continue
             fi
 
-            # Does this commit touch pyproject.toml?
             touches_pyproject=false
             if git diff-tree --no-commit-id --name-only -r "$commit" | grep -qx 'pyproject.toml'; then
               touches_pyproject=true
@@ -75,29 +72,24 @@ jobs:
             echo "Applying: $short  $subject"
 
             if [ "$touches_pyproject" = true ]; then
-              # Apply changes but do NOT commit yet
               if ! git cherry-pick -n --allow-empty "$commit"; then
                 echo "::error::Conflict while applying $short – $subject"
                 git cherry-pick --abort || true
                 exit 1
               fi
 
-              # Throw away only the pyproject.toml changes
               git checkout HEAD -- pyproject.toml 2>/dev/null || true
               git restore --staged --worktree pyproject.toml 2>/dev/null || true
 
-              # If nothing is left staged, this commit was only pyproject.toml → skip it
               if git diff --cached --quiet; then
                 echo "SKIP (only touched pyproject.toml): $short  $subject"
-                git reset --hard HEAD   # clean up
+                git reset --hard HEAD
                 ((SKIPPED++)) || true
                 continue
               fi
 
-              # Commit the remaining changes with the original message
               git commit -m "$message"
             else
-              # Normal cherry-pick
               if ! git cherry-pick --allow-empty "$commit"; then
                 echo "::error::Conflict on $short – $subject"
                 git cherry-pick --abort || true
