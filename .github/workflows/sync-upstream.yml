@@ -43,11 +43,9 @@ jobs:
           SYNC_POINT_FILE=".github/upstream-sync-point"
           UPSTREAM_TIP=$(git rev-parse upstream/master)
 
-          # Determine the range of commits to examine
           if [ -f "$SYNC_POINT_FILE" ]; then
             LAST_SYNCED=$(cat "$SYNC_POINT_FILE" | tr -d '[:space:]')
             echo "Last sync point: $LAST_SYNCED"
-            # Only commits after the last sync point
             mapfile -t NEW_COMMITS < <(git rev-list --reverse "${LAST_SYNCED}..upstream/master")
           else
             echo "No previous sync point found – examining all commits not in HEAD"
@@ -57,7 +55,6 @@ jobs:
           if [ ${#NEW_COMMITS[@]} -eq 0 ]; then
             echo "No new commits since last sync point."
             echo "applied=false" >> "$GITHUB_OUTPUT"
-            # Still update the sync point so we don't re-examine old history
             echo "$UPSTREAM_TIP" > "$SYNC_POINT_FILE"
             git add "$SYNC_POINT_FILE"
             if ! git diff --cached --quiet; then
@@ -75,7 +72,15 @@ jobs:
           for commit in "${NEW_COMMITS[@]}"; do
             short=$(git rev-parse --short "$commit")
             subject=$(git log -1 --pretty=format:'%s' "$commit")
-            message=$(git log -1 --pretty=format:'%B' "$commit")
+
+            # Sanitize commit message to avoid notifying upstream PRs/issues
+            message=$(git log -1 --pretty=format:'%B' "$commit" \
+              | sed -E 's/\(yt-dlp#[0-9]+\)//g' \
+              | sed -E 's/\(#[0-9]+\)//g' \
+              | sed -E 's/yt-dlp#[0-9]+//g' \
+              | sed -E 's/#[0-9]+//g' \
+              | sed -E 's/  +/ /g' \
+              | sed -E 's/ +$//')
 
             # Explicit SHA skip
             if echo "$SKIP_SHAS" | grep -q "$commit"; then
@@ -127,6 +132,9 @@ jobs:
                 git cherry-pick --abort || true
                 exit 1
               fi
+
+              # Rewrite commit message to remove GitHub references
+              git commit --amend -m "$message" --no-edit || true
             fi
 
             ((APPLIED++)) || true
@@ -134,7 +142,7 @@ jobs:
 
           echo "Applied: $APPLIED   Skipped: $SKIPPED"
 
-          # Always update the sync point to the current upstream tip
+          # Always update the sync point
           mkdir -p .github
           echo "$UPSTREAM_TIP" > "$SYNC_POINT_FILE"
           git add "$SYNC_POINT_FILE"
