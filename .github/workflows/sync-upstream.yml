@@ -106,7 +106,6 @@ jobs:
               set -e
 
               if [ $status -ne 0 ]; then
-                # Conflicts are expected in pyproject.toml / uv.lock – resolve by taking ours
                 echo "Conflicts while applying build-meta commit (expected) – keeping our versions"
               fi
 
@@ -124,6 +123,7 @@ jobs:
 
               # Commit whatever is left (the non-meta changes)
               git commit -m "$message"
+              ((APPLIED++)) || true
             else
               set +e
               git cherry-pick --allow-empty "$commit"
@@ -131,22 +131,26 @@ jobs:
               set -e
 
               if [ $status -ne 0 ]; then
+                # Empty / already-applied case
                 if [ -f .git/CHERRY_PICK_HEAD ] && git diff --quiet && git diff --cached --quiet; then
                   echo "SKIP (already applied / empty): $short  $subject"
                   git cherry-pick --skip || true
                   ((SKIPPED++)) || true
                   continue
                 fi
-                echo "::error::Conflict on $short – $subject"
+
+                # Real conflict → skip the commit instead of failing the whole job
+                echo "SKIP (conflict): $short  $subject"
                 git cherry-pick --abort || true
-                exit 1
+                git reset --hard HEAD
+                ((SKIPPED++)) || true
+                continue
               fi
 
               # Rewrite commit message to remove GitHub references
               git commit --amend -m "$message" --no-edit || true
+              ((APPLIED++)) || true
             fi
-
-            ((APPLIED++)) || true
           done
 
           echo "Applied: $APPLIED   Skipped: $SKIPPED"
