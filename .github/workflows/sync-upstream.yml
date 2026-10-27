@@ -89,30 +89,40 @@ jobs:
               continue
             fi
 
-            touches_pyproject=false
-            if git diff-tree --no-commit-id --name-only -r "$commit" | grep -qx 'pyproject.toml'; then
-              touches_pyproject=true
+            # Does this commit touch build/dependency files we want to ignore?
+            touches_build_meta=false
+            if git diff-tree --no-commit-id --name-only -r "$commit" \
+                 | grep -E -q '^(pyproject\.toml|uv\.lock)$'; then
+              touches_build_meta=true
             fi
 
             echo "Applying: $short  $subject"
 
-            if [ "$touches_pyproject" = true ]; then
-              if ! git cherry-pick -n --allow-empty "$commit"; then
-                echo "::error::Conflict while applying $short – $subject"
-                git cherry-pick --abort || true
-                exit 1
+            if [ "$touches_build_meta" = true ]; then
+              # Apply without committing so we can surgically drop the files we don't want
+              set +e
+              git cherry-pick -n --allow-empty "$commit"
+              status=$?
+              set -e
+
+              if [ $status -ne 0 ]; then
+                # Conflicts are expected in pyproject.toml / uv.lock – resolve by taking ours
+                echo "Conflicts while applying build-meta commit (expected) – keeping our versions"
               fi
 
-              git checkout HEAD -- pyproject.toml 2>/dev/null || true
-              git restore --staged --worktree pyproject.toml 2>/dev/null || true
+              # Always force our versions of the two files
+              git checkout HEAD -- pyproject.toml uv.lock 2>/dev/null || true
+              git restore --staged --worktree pyproject.toml uv.lock 2>/dev/null || true
 
+              # If nothing else remains staged, the commit only changed the files we ignore
               if git diff --cached --quiet; then
-                echo "SKIP (only touched pyproject.toml or already applied): $short  $subject"
+                echo "SKIP (only touched pyproject.toml / uv.lock or already applied): $short  $subject"
                 git reset --hard HEAD
                 ((SKIPPED++)) || true
                 continue
               fi
 
+              # Commit whatever is left (the non-meta changes)
               git commit -m "$message"
             else
               set +e
@@ -127,7 +137,6 @@ jobs:
                   ((SKIPPED++)) || true
                   continue
                 fi
-
                 echo "::error::Conflict on $short – $subject"
                 git cherry-pick --abort || true
                 exit 1
