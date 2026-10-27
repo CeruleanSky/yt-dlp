@@ -49,12 +49,13 @@ jobs:
             mapfile -t NEW_COMMITS < <(git rev-list --reverse "${LAST_SYNCED}..upstream/master")
           else
             echo "No previous sync point found – examining all commits not in HEAD"
-            mapfile -t NEW_COMMITS < <(git rev-list --reverse HEAD..upstream/master)
+            mapfile -t NEW_COMMITS < <(git rev-list --reverse HEAD..upstream/master")
           fi
 
           if [ ${#NEW_COMMITS[@]} -eq 0 ]; then
             echo "No new commits since last sync point."
             echo "applied=false" >> "$GITHUB_OUTPUT"
+            mkdir -p .github
             echo "$UPSTREAM_TIP" > "$SYNC_POINT_FILE"
             git add "$SYNC_POINT_FILE"
             if ! git diff --cached --quiet; then
@@ -69,11 +70,18 @@ jobs:
           APPLIED=0
           SKIPPED=0
 
+          # Helper: hard-reset to a clean state
+          clean_state() {
+            git cherry-pick --abort 2>/dev/null || true
+            git reset --hard HEAD
+            git clean -fd
+          }
+
           for commit in "${NEW_COMMITS[@]}"; do
             short=$(git rev-parse --short "$commit")
             subject=$(git log -1 --pretty=format:'%s' "$commit")
 
-            # Sanitize commit message to avoid notifying upstream PRs/issues
+            # Sanitize commit message (strip upstream PR/issue refs)
             message=$(git log -1 --pretty=format:'%B' "$commit" \
               | sed -E 's/\(yt-dlp#[0-9]+\)//g' \
               | sed -E 's/\(#[0-9]+\)//g' \
@@ -89,7 +97,7 @@ jobs:
               continue
             fi
 
-            # Does this commit touch build/dependency files we want to ignore?
+            # Does this commit touch the files we never want from upstream?
             touches_build_meta=false
             if git diff-tree --no-commit-id --name-only -r "$commit" \
                  | grep -E -q '^(pyproject\.toml|uv\.lock)$'; then
@@ -99,39 +107,49 @@ jobs:
             echo "Applying: $short  $subject"
 
             if [ "$touches_build_meta" = true ]; then
-              # Apply without committing so we can surgically drop the files we don't want
+              # Apply without committing so we can drop the meta files
               set +e
               git cherry-pick -n --allow-empty "$commit"
               status=$?
               set -e
 
               if [ $status -ne 0 ]; then
-                echo "Conflicts while applying build-meta commit (expected) – keeping our versions"
+                echo "  → conflicts while applying build-meta commit (expected) – keeping our versions of pyproject.toml / uv.lock"
               fi
 
-              # Always force our versions of the two files
+              # Always force *our* versions of the two files
               git checkout HEAD -- pyproject.toml uv.lock 2>/dev/null || true
               git restore --staged --worktree pyproject.toml uv.lock 2>/dev/null || true
 
-              # If nothing else remains staged, the commit only changed the files we ignore
-              if git diff --cached --quiet; then
-                echo "SKIP (only touched pyproject.toml / uv.lock or already applied): $short  $subject"
-                git reset --hard HEAD
+              # Any remaining unmerged paths? → treat as conflict and skip
+              if git ls-files -u | grep -q .; then
+                echo "SKIP (unresolved conflicts after meta-file restore): $short  $subject"
+                clean_state
                 ((SKIPPED++)) || true
                 continue
               fi
 
-              # Commit whatever is left (the non-meta changes)
+              # Nothing left staged → pure meta commit (or already applied)
+              if git diff --cached --quiet; then
+                echo "SKIP (only touched pyproject.toml / uv.lock or already applied): $short  $subject"
+                clean_state
+                ((SKIPPED++)) || true
+                continue
+              fi
+
+              # Commit the non-meta changes
               git commit -m "$message"
               ((APPLIED++)) || true
+
             else
+              # Normal commit
               set +e
               git cherry-pick --allow-empty "$commit"
               status=$?
               set -e
 
               if [ $status -ne 0 ]; then
-                # Empty / already-applied case
+                # Empty / already-applied
                 if [ -f .git/CHERRY_PICK_HEAD ] && git diff --quiet && git diff --cached --quiet; then
                   echo "SKIP (already applied / empty): $short  $subject"
                   git cherry-pick --skip || true
@@ -139,15 +157,14 @@ jobs:
                   continue
                 fi
 
-                # Real conflict → skip the commit instead of failing the whole job
+                # Real conflict → skip instead of failing the job
                 echo "SKIP (conflict): $short  $subject"
-                git cherry-pick --abort || true
-                git reset --hard HEAD
+                clean_state
                 ((SKIPPED++)) || true
                 continue
               fi
 
-              # Rewrite commit message to remove GitHub references
+              # Rewrite message to remove GitHub references
               git commit --amend -m "$message" --no-edit || true
               ((APPLIED++)) || true
             fi
@@ -155,7 +172,7 @@ jobs:
 
           echo "Applied: $APPLIED   Skipped: $SKIPPED"
 
-          # Always update the sync point
+          # Always advance the sync point
           mkdir -p .github
           echo "$UPSTREAM_TIP" > "$SYNC_POINT_FILE"
           git add "$SYNC_POINT_FILE"
