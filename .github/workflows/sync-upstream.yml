@@ -49,7 +49,7 @@ jobs:
             mapfile -t NEW_COMMITS < <(git rev-list --reverse "${LAST_SYNCED}..upstream/master")
           else
             echo "No previous sync point found – examining all commits not in HEAD"
-            mapfile -t NEW_COMMITS < <(git rev-list --reverse HEAD..upstream/master")
+            mapfile -t NEW_COMMITS < <(git rev-list --reverse HEAD..upstream/master)
           fi
 
           if [ ${#NEW_COMMITS[@]} -eq 0 ]; then
